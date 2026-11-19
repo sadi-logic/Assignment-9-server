@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 
 const app = express();
 const port = process.env.PORT || 5000
@@ -34,15 +34,15 @@ app.get('/', (req, res) => {
   res.send('Salon-Book Backend');
 });
 
-app.get('/users',async(req,res)=>{
-    const cursor = users.find({});
-    const result = await cursor.toArray();
-    res.send(result);
+app.get('/users', async (req, res) => {
+  const cursor = users.find({});
+  const result = await cursor.toArray();
+  res.send(result);
 })
 
 //services related api
 
-app.post('/services',async(req,res)=>{
+app.post('/services', async (req, res) => {
   // `createdAt` is stamped here, not accepted from the client: a JSON body
   // carries an ISO string, which Mongo would store as text instead of a Date.
   const service = { ...req.body, createdAt: new Date() };
@@ -51,7 +51,21 @@ app.post('/services',async(req,res)=>{
 })
 
 app.get("/services", async (req, res) => {
-  const result = await services.find().toArray();
+  const query = {};
+  if (req.query) {
+    if (req.query.category) {
+      query.category = req.query.category;
+    }
+    if (req.query.search) {
+      query.$or = [
+        { serviceName: { $regex: req.query.search, $options: 'i' } },
+        { description: { $regex: req.query.search, $options: 'i' } },
+        { category: { $regex: req.query.search, $options: 'i' } }
+      ];
+    }
+  }
+  const cursor = services.find(query)
+  const result = await cursor.toArray();
 
   res.send(result);
 })
@@ -74,9 +88,9 @@ app.patch("/services/:id", async (req, res) => {
 
 app.delete("/services/:id", async (req, res) => {
   const id = req.params.id;
-  const result = await studiosCollection.deleteOne({ _id: new ObjectId(id) });
+  const result = await services.deleteOne({ _id: new ObjectId(id) });
   if (result.deletedCount === 0) {
-    return res.status(404).send("Studio not found");
+    return res.status(404).send("Service not found");
   }
   res.send("Service deleted successfully");
 });
