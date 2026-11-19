@@ -29,6 +29,7 @@ const database = connectedClient.db("salonbookdb");
 
 const users = database.collection("user");
 const services = database.collection("services")
+const appointments = database.collection("appointments");
 
 app.get('/', (req, res) => {
   res.send('Salon-Book Backend');
@@ -96,6 +97,167 @@ app.delete("/services/:id", async (req, res) => {
 });
 
 
+
+// Appointment api
+
+const appointmentTimeSlots = [
+  "10:00 AM",
+  "11:00 AM",
+  "12:00 PM",
+  "01:00 PM",
+  "02:00 PM",
+  "03:00 PM",
+  "04:00 PM",
+  "05:00 PM",
+  "06:00 PM",
+  "07:00 PM",
+];
+
+app.post("/appointments", async (req, res) => {
+  try {
+    const {
+      serviceId,
+      customerId,
+      appointmentDate,
+      timeSlot,
+      message,
+    } = req.body;
+
+    // 1. Appointment fields
+    if (
+      typeof serviceId !== "string" ||
+      !ObjectId.isValid(serviceId)
+    ) {
+      return res.status(400).json({
+        error: "Invalid service ID.",
+      });
+    }
+
+    if (
+      typeof appointmentDate !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate)
+    ) {
+      return res.status(422).json({
+        error: "Appointment date must use the YYYY-MM-DD format.",
+      });
+    }
+
+    // Reject past dates.
+    const today = new Date();
+    const todayString =
+      `${today.getFullYear()}-` +
+      `${String(today.getMonth() + 1).padStart(2, "0")}-` +
+      `${String(today.getDate()).padStart(2, "0")}`;
+
+    if (appointmentDate < todayString) {
+      return res.status(422).json({
+        error: "Choose today or a later date.",
+      });
+    }
+
+    if (
+      typeof timeSlot !== "string" ||
+      !appointmentTimeSlots.includes(timeSlot)
+    ) {
+      return res.status(422).json({
+        error: "Choose a valid appointment time slot.",
+      });
+    }
+
+    if (typeof message !== "undefined" && typeof message !== "string") {
+      return res.status(422).json({
+        error: "The additional message must be text.",
+      });
+    }
+
+    const appointmentMessage =
+      typeof message === "string" ? message.trim() : "";
+
+    if (appointmentMessage.length > 500) {
+      return res.status(422).json({
+        error: "The appointment message cannot exceed 500 characters.",
+      });
+    }
+
+    // 2. Temporary local customer identity
+    //
+    // The Next.js booking route currently sends the Better Auth user ID.
+    // This must later be replaced by JWT/session middleware and not trusted
+    // from req.body.
+    if (
+      typeof customerId !== "string" ||
+      customerId.trim() === ""
+    ) {
+      return res.status(401).json({
+        error: "Customer authentication is required.",
+      });
+    }
+
+    // 3. Verify that the service exists
+    const service = await services.findOne({
+      _id: new ObjectId(serviceId),
+    });
+
+    if (!service) {
+      return res.status(404).json({
+        error: "That service no longer exists.",
+      });
+    }
+
+    // 4. Prevent booking inactive services
+    if (service.status !== "active") {
+      return res.status(409).json({
+        error: "This service is inactive and cannot be booked.",
+      });
+    }
+
+    // 5. Prevent duplicate active appointments
+    const existingAppointment = await appointments.findOne({
+      serviceId: new ObjectId(serviceId),
+      appointmentDate,
+      timeSlot,
+      status: { $ne: "cancelled" },
+    });
+
+    if (existingAppointment) {
+      return res.status(409).json({
+        error: "That date and time slot are already booked.",
+      });
+    }
+
+    // 6. Create the server-controlled appointment document
+    const appointment = {
+      serviceId: new ObjectId(serviceId),
+      customerId: customerId.trim(),
+      appointmentDate,
+      timeSlot,
+      message: appointmentMessage,
+      servicePrice: service.price,
+      paymentStatus: "unpaid",
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    const result = await appointments.insertOne(appointment);
+
+    if (!result.acknowledged) {
+      return res.status(500).json({
+        error: "The appointment could not be saved.",
+      });
+    }
+
+    return res.status(201).json({
+      ok: true,
+      id: result.insertedId.toString(),
+    });
+  } catch (error) {
+    console.error("Could not create appointment:", error);
+
+    return res.status(500).json({
+      error: "An unexpected error occurred while booking the appointment.",
+    });
+  }
+});
 
 app.listen(port, () => {
   console.log(`The Salon Book is running on ${port}`);
