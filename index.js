@@ -259,6 +259,103 @@ app.post("/appointments", async (req, res) => {
   }
 });
 
+// Returns the signed-in customer's appointments, newest first.
+//
+// The Next.js server sends the customer id it read from the verified Better
+// Auth session. Express compares that id with the stored `customerId`, so one
+// customer can never read another customer's appointment list.
+app.get("/appointments", async (req, res) => {
+  try {
+    const customerId =
+      typeof req.query.customerId === "string"
+        ? req.query.customerId.trim()
+        : "";
+
+    if (!customerId) {
+      return res.status(400).json({
+        error: "A customer id is required.",
+      });
+    }
+
+    const result = await appointments
+      .find({ customerId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.send(result);
+  } catch (error) {
+    console.error("Could not load appointments:", error);
+
+    return res.status(500).json({
+      error: "An unexpected error occurred while loading appointments.",
+    });
+  }
+});
+
+// Cancels one appointment. Only the owner can cancel, and only while it is
+// still pending.
+app.patch("/appointments/:id/cancel", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { customerId } = req.body ?? {};
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid appointment ID." });
+    }
+
+    // Same temporary identity check as POST /appointments. This must later be
+    // replaced by real session verification inside Express.
+    if (typeof customerId !== "string" || customerId.trim() === "") {
+      return res.status(401).json({
+        error: "Customer authentication is required.",
+      });
+    }
+
+    const appointment = await appointments.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!appointment) {
+      return res.status(404).json({ error: "Appointment not found." });
+    }
+
+    if (appointment.customerId !== customerId.trim()) {
+      return res.status(403).json({
+        error: "You can only cancel your own appointments.",
+      });
+    }
+
+    if (appointment.status !== "pending") {
+      return res.status(409).json({
+        error:
+          appointment.status === "cancelled"
+            ? "This appointment is already cancelled."
+            : "Confirmed appointments cannot be cancelled.",
+      });
+    }
+
+
+    const result = await appointments.updateOne(
+      { _id: new ObjectId(id), customerId: customerId.trim(), status: "pending" },
+      { $set: { status: "cancelled" } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).json({
+        error: "This appointment can no longer be cancelled.",
+      });
+    }
+
+    return res.send({ ok: true });
+  } catch (error) {
+    console.error("Could not cancel appointment:", error);
+
+    return res.status(500).json({
+      error: "An unexpected error occurred while cancelling the appointment.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`The Salon Book is running on ${port}`);
 });
