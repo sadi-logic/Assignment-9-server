@@ -695,7 +695,7 @@ app.patch(
 // ---------------------------------------------------------------------------
 // Payments
 // ---------------------------------------------------------------------------
-app.get("/admin/transactions",  verifyAdmin, async (req, res) => {
+app.get("/admin/transactions", verifyToken,  verifyAdmin, async (req, res) => {
   try {
     const list = await transactions.find({}).sort({ createdAt: -1 }).toArray();
     const appointmentIds = [
