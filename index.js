@@ -32,7 +32,7 @@ export async function connectToMongoDB() {
 }
 
 const connectedClient = await connectToMongoDB();
-const database = connectedClient.db(process.env.DB_NAME || "salonbook");
+const database = connectedClient.db(process.env.DB_NAME || "salonbookdb");
 
 const users = database.collection("user");
 
