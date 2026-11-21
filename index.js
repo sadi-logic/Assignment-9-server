@@ -10,17 +10,13 @@ const port = process.env.PORT || 5000
 
 
 //middlewares
-//
-// `verify` keeps the untouched request body on `req.rawBody`. Stripe signs the
-// exact bytes it sent, so the webhook needs those bytes - the parsed JSON on
-// `req.body` would not match the signature. Every other route is unaffected.
-app.use(
-  express.json({
-    verify: (req, res, buffer) => {
+
+app.use(express.json({verify: (req, res, buffer) => {
       req.rawBody = buffer;
     },
   })
 );
+
 app.use(cors());
 
 const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-lltgfzm-shard-00-00.radi1mm.mongodb.net:27017,ac-lltgfzm-shard-00-01.radi1mm.mongodb.net:27017,ac-lltgfzm-shard-00-02.radi1mm.mongodb.net:27017/?ssl=true&replicaSet=atlas-rxk7b7-shard-0&authSource=admin`);
@@ -36,34 +32,26 @@ export async function connectToMongoDB() {
 }
 
 const connectedClient = await connectToMongoDB();
-const database = connectedClient.db("salonbookdb");
+const database = connectedClient.db(process.env.DB_NAME || "salonbook");
 
 const users = database.collection("user");
-// Better Auth writes one document per signed-in browser session here. Express
-// only reads it, to turn a bearer token back into a user.
+
 const sessions = database.collection("session");
 const services = database.collection("services")
 const appointments = database.collection("appointments");
 const transactions = database.collection("transactions");
 
-// ---------------------------------------------------------------------------
-// Payment configuration
-// ---------------------------------------------------------------------------
 
-// Where Stripe sends the customer after paying or cancelling. Stripe needs a
-// full address, so the Next.js app's address is reused when APP_URL is absent.
 const appUrl = (
   process.env.APP_URL ||
   process.env.BETTER_AUTH_URL ||
   "http://localhost:3000"
 ).replace(/\/+$/, "");
 
-// Lower-case ISO code, for example "bdt". BDT uses two decimals, so 2000 BDT
-// becomes 200000 in Stripe's smallest unit.
+
 const paymentCurrency = (process.env.STRIPE_CURRENCY || "bdt").toLowerCase();
 
-// Stripe is optional in local development, but its secret key never leaves
-// this server.
+
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
   : null;
@@ -85,18 +73,9 @@ await transactions.createIndex(
   }
 );
 
-// ---------------------------------------------------------------------------
-// Token authentication
-// ---------------------------------------------------------------------------
 
-// Better Auth (inside the Next.js app) owns the sessions. Every protected
-// request carries the session token in an `Authorization: Bearer <token>`
-// header, and this middleware looks that token up in the `session` collection
-//
-// Nothing in the token itself is trusted: the role and the blocked flag always
-// come from the user document in the database, so a crafted request cannot
-// claim to be an admin. Because the database is read on every request, a
-// blocked account is rejected immediately, not when a token happens to expire.
+// JWT 
+
 const verifyToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -110,23 +89,16 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // The token is an opaque random string; only its owner can be found.
+   
     const session = await sessions.findOne({ token });
     if (!session) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-
-    // Better Auth records the expiry, so a stale session is refused even if
-    // its document has not been cleaned up yet.
     if (!session.expiresAt || new Date(session.expiresAt).getTime() < Date.now()) {
       return res.status(401).json({
         error: "Your session has expired. Sign in again.",
       });
     }
-
-    // `session.userId` is a reference to the user document, so it is looked up
-    // on `_id`. `new ObjectId(...)` accepts both the ObjectId the MongoDB
-    // adapter stores and a plain 24-character hex string.
     const user = await users.findOne({ _id: new ObjectId(session.userId) });
     if (!user) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -141,13 +113,7 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-/**
- * Role gate for the admin routes. It must run after `verifyToken`, which is
- * what puts the database user on `req.user`.
- *
- * Rejects anyone whose role is not `admin` and any blocked account. The
- * remaining routes never look at user input for the role.
- */
+
 const verifyAdmin = (req, res, next) => {
   if (req.user.role !== "admin") {
     return res.status(403).json({
@@ -162,13 +128,6 @@ const verifyAdmin = (req, res, next) => {
   next();
 }
 
-/**
- * Role gate for the customer routes. It must run after `verifyToken`.
- *
- * Same idea as `verifyAdmin`: the customer id comes from the verified session,
- * never from the request body. `req.customer` keeps the shape the routes
- * already use (`req.customer.id`), even though the document only has `_id`.
- */
 const verifyCustomer = (req, res, next) => {
   if (req.user.role !== "customer") {
     return res.status(403).json({
@@ -235,8 +194,6 @@ app.patch("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
 //services related api
 
 app.post('/services', verifyToken, verifyAdmin, async (req, res) => {
-  // `createdAt` is stamped here, not accepted from the client: a JSON body
-  // carries an ISO string, which Mongo would store as text instead of a Date.
   const service = { ...req.body, createdAt: new Date() };
   const result = await services.insertOne(service);
   res.status(201).send(result);
@@ -313,7 +270,6 @@ app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
       message,
     } = req.body;
 
-    // 1. Appointment fields
     if (
       typeof serviceId !== "string" ||
       !ObjectId.isValid(serviceId)
@@ -331,8 +287,6 @@ app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
         error: "Appointment date must use the YYYY-MM-DD format.",
       });
     }
-
-    // Reject past dates.
     const today = new Date();
     const todayString =
       `${today.getFullYear()}-` +
@@ -369,7 +323,7 @@ app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
       });
     }
 
-    // 2. Verify that the service exists
+    
     const service = await services.findOne({
       _id: new ObjectId(serviceId),
     });
@@ -380,14 +334,14 @@ app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
       });
     }
 
-    // 3. Prevent booking inactive services
+
     if (service.status !== "active") {
       return res.status(409).json({
         error: "This service is inactive and cannot be booked.",
       });
     }
 
-    // 4. Prevent duplicate active appointments
+
     const existingAppointment = await appointments.findOne({
       serviceId: new ObjectId(serviceId),
       appointmentDate,
@@ -401,7 +355,7 @@ app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
       });
     }
 
-    // 5. Create the server-controlled appointment document
+ 
     const appointment = {
       serviceId: new ObjectId(serviceId),
       customerId: req.customer.id,
@@ -435,7 +389,6 @@ app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
   }
 });
 
-// Returns the signed-in customer's appointments, newest first.
 app.get("/appointments", verifyToken,  verifyCustomer, async (req, res) => {
   try {
     const result = await appointments
@@ -453,8 +406,6 @@ app.get("/appointments", verifyToken,  verifyCustomer, async (req, res) => {
   }
 });
 
-// Cancels one appointment. Only the owner can cancel, and only while it is
-// still pending.
 app.patch("/appointments/:id/cancel", verifyToken,  verifyCustomer, async (req, res) => {
   try {
     const { id } = req.params;
@@ -508,15 +459,7 @@ app.patch("/appointments/:id/cancel", verifyToken,  verifyCustomer, async (req, 
   }
 });
 
-// ---------------------------------------------------------------------------
 // Admin appointment management
-// ---------------------------------------------------------------------------
-
-// Every appointment for the admin table, newest first, with the customer and
-// service information the page needs attached to each row.
-//
-// The join happens here (not in the browser, and not through the unprotected
-// `/users` endpoint) and only the safe fields are selected.
 app.get("/admin/appointments", verifyToken,verifyAdmin, async (req, res) => {
   try {
     const list = await appointments
@@ -568,8 +511,6 @@ app.get("/admin/appointments", verifyToken,verifyAdmin, async (req, res) => {
       list.map((appointment) => ({
         ...appointment,
         service: servicesById.get(String(appointment.serviceId)) ?? null,
-        // A deleted account leaves the appointment intact; the page shows a
-        // neutral fallback in that case.
         customer: customersById.get(String(appointment.customerId)) ?? null,
       }))
     );
@@ -582,13 +523,8 @@ app.get("/admin/appointments", verifyToken,verifyAdmin, async (req, res) => {
   }
 });
 
-// Confirms one appointment. Allowed only while it is still pending; the status
-// filter in the update makes the transition atomic.
-app.patch(
-  "/admin/appointments/:id/confirm",
-  verifyToken,
-  verifyAdmin,
-  async (req, res) => {
+
+app.patch("/admin/appointments/:id/confirm", verifyToken,verifyAdmin,async (req, res) => {
     try {
       const { id } = req.params;
 
@@ -611,9 +547,6 @@ app.patch(
               : "This appointment is already confirmed.",
         });
       }
-
-      // Only `status` is written. Payment status and every other field are
-      // left exactly as they were.
       const result = await appointments.updateOne(
         { _id: appointmentId, status: "pending" },
         { $set: { status: "confirmed" } }
@@ -636,9 +569,6 @@ app.patch(
     }
   }
 );
-
-// Cancels one appointment. Admins may cancel a pending or a confirmed
-// appointment, but never one that is already cancelled.
 app.patch(
   "/admin/appointments/:id/cancel",
   verifyToken,
@@ -666,9 +596,6 @@ app.patch(
           error: "This appointment is already cancelled.",
         });
       }
-
-      // The same two-value filter is repeated in the update so a simultaneous
-      // request cannot cancel something that just changed.
       const result = await appointments.updateOne(
         { _id: appointmentId, status: { $in: ["pending", "confirmed"] } },
         { $set: { status: "cancelled" } }
@@ -692,9 +619,6 @@ app.patch(
   }
 );
 
-// ---------------------------------------------------------------------------
-// Payments
-// ---------------------------------------------------------------------------
 app.get("/admin/transactions", verifyToken,verifyAdmin, async (req, res) => {
   try {
     const list = await transactions.find({}).sort({ createdAt: -1 }).toArray();
@@ -991,3 +915,4 @@ app.post("/payments/webhook", async (req, res) => {
 app.listen(port, () => {
   console.log(`The Salon Book is running on ${port}`);
 });
+export default app;
