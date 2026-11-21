@@ -278,7 +278,7 @@ app.patch("/services/:id", verifyToken,verifyAdmin, async (req, res) => {
   res.send(result);
 });
 
-app.delete("/services/:id",  verifyAdmin, async (req, res) => {
+app.delete("/services/:id", verifyToken,verifyAdmin, async (req, res) => {
   const id = req.params.id;
   const result = await services.deleteOne({ _id: new ObjectId(id) });
   if (result.deletedCount === 0) {
@@ -695,7 +695,7 @@ app.patch(
 // ---------------------------------------------------------------------------
 // Payments
 // ---------------------------------------------------------------------------
-app.get("/admin/transactions", verifyToken,  verifyAdmin, async (req, res) => {
+app.get("/admin/transactions", verifyToken,verifyAdmin, async (req, res) => {
   try {
     const list = await transactions.find({}).sort({ createdAt: -1 }).toArray();
     const appointmentIds = [
@@ -777,7 +777,7 @@ app.get("/admin/transactions", verifyToken,  verifyAdmin, async (req, res) => {
   }
 });
 
-app.post("/payments/checkout",  verifyCustomer, async (req, res) => {
+app.post("/payments/checkout", verifyToken, verifyCustomer, async (req, res) => {
   let session;
   try {
     if (!stripe) {
