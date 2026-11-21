@@ -188,7 +188,7 @@ app.get('/', (req, res) => {
   res.send('Salon-Book Backend');
 });
 
-app.get('/users',  verifyAdmin, async (req, res) => {
+app.get('/users', verifyToken,verifyAdmin, async (req, res) => {
   try {
     const result = await users
       .find({ role: "customer" })
@@ -203,7 +203,7 @@ app.get('/users',  verifyAdmin, async (req, res) => {
   }
 });
 
-app.patch("/users/:id", verifyAdmin, async (req, res) => {
+app.patch("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { isBlocked } = req.body ?? {};
