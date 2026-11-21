@@ -304,7 +304,7 @@ const appointmentTimeSlots = [
   "07:00 PM",
 ];
 
-app.post("/appointments",  verifyCustomer, async (req, res) => {
+app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const {
       serviceId,
@@ -436,7 +436,7 @@ app.post("/appointments",  verifyCustomer, async (req, res) => {
 });
 
 // Returns the signed-in customer's appointments, newest first.
-app.get("/appointments",  verifyCustomer, async (req, res) => {
+app.get("/appointments", verifyToken,  verifyCustomer, async (req, res) => {
   try {
     const result = await appointments
       .find({ customerId: req.customer.id })
