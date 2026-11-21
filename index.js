@@ -39,6 +39,9 @@ const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("salonbookdb");
 
 const users = database.collection("user");
+// Better Auth writes one document per signed-in browser session here. Express
+// only reads it, to turn a bearer token back into a user.
+const sessions = database.collection("session");
 const services = database.collection("services")
 const appointments = database.collection("appointments");
 const transactions = database.collection("transactions");
@@ -83,62 +86,76 @@ await transactions.createIndex(
 );
 
 // ---------------------------------------------------------------------------
-// Admin authentication
+// Token authentication
 // ---------------------------------------------------------------------------
 
-// Better Auth (inside the Next.js app) owns the sessions. Express does not
-// create or decode them, so it asks Better Auth who the cookie belongs to.
-// The role always comes from that session record, never from the request body
-// or query string, so a crafted request cannot claim to be an admin.
-const authBaseUrl = (
-  process.env.BETTER_AUTH_URL || "http://localhost:3000"
-).replace(/\/+$/, "");
-
-const readSession = async (cookie) => {
-  if (!cookie) return null;
-
+// Better Auth (inside the Next.js app) owns the sessions. Every protected
+// request carries the session token in an `Authorization: Bearer <token>`
+// header, and this middleware looks that token up in the `session` collection
+//
+// Nothing in the token itself is trusted: the role and the blocked flag always
+// come from the user document in the database, so a crafted request cannot
+// claim to be an admin. Because the database is read on every request, a
+// blocked account is rejected immediately, not when a token happens to expire.
+const verifyToken = async (req, res, next) => {
   try {
-    const response = await fetch(`${authBaseUrl}/api/auth/get-session`, {
-      headers: { cookie },
-      signal: AbortSignal.timeout(5000),
-    });
+    const authHeader = req.headers.authorization;
 
-    if (!response.ok) return null;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
 
-    const payload = await response.json().catch(() => null);
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (!token) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
 
-    // Better Auth answers `null` when the cookie is missing or expired.
-    return payload?.user ? payload : null;
-  } catch {
-    // If the auth service cannot be reached, access is denied rather than
-    // granted.
-    return null;
+    // The token is an opaque random string; only its owner can be found.
+    const session = await sessions.findOne({ token });
+    if (!session) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // Better Auth records the expiry, so a stale session is refused even if
+    // its document has not been cleaned up yet.
+    if (!session.expiresAt || new Date(session.expiresAt).getTime() < Date.now()) {
+      return res.status(401).json({
+        error: "Your session has expired. Sign in again.",
+      });
+    }
+
+    // `session.userId` is a reference to the user document, so it is looked up
+    // on `_id`. `new ObjectId(...)` accepts both the ObjectId the MongoDB
+    // adapter stores and a plain 24-character hex string.
+    const user = await users.findOne({ _id: new ObjectId(session.userId) });
+    if (!user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    req.user = user;
+    req.session = session;
+    next();
+  } catch (error) {
+    console.error("Token verification failed:", error);
+    return res.status(401).json({ error: "Unauthorized" });
   }
-}
+};
 
 /**
- * Gate for the admin appointment routes below.
+ * Role gate for the admin routes. It must run after `verifyToken`, which is
+ * what puts the database user on `req.user`.
  *
- * Rejects anyone without a real session, anyone whose role is not `admin`, and
- * any blocked account. The remaining routes never look at user input for the
- * role.
+ * Rejects anyone whose role is not `admin` and any blocked account. The
+ * remaining routes never look at user input for the role.
  */
- const verifyAdmin = async (req, res, next) => {
-  const session = await readSession(req.headers.cookie);
-
-  if (!session) {
-    return res.status(401).json({
-      error: "Sign in as an administrator to manage appointments.",
-    });
-  }
-
-  if (session.user.role !== "admin") {
+const verifyAdmin = (req, res, next) => {
+  if (req.user.role !== "admin") {
     return res.status(403).json({
       error: "Only administrators can manage appointments.",
     });
   }
 
-  if (session.user.isBlocked) {
+  if (req.user.isBlocked) {
     return res.status(403).json({ error: "This account is blocked." });
   }
 
@@ -146,31 +163,24 @@ const readSession = async (cookie) => {
 }
 
 /**
- * Gate for the payment routes.
+ * Role gate for the customer routes. It must run after `verifyToken`.
  *
- * Same idea as `verifyAdmin`: Better Auth says who owns the cookie, and the
- * customer id is taken from that verified session. A request body can never
- * choose who is paying.
+ * Same idea as `verifyAdmin`: the customer id comes from the verified session,
+ * never from the request body. `req.customer` keeps the shape the routes
+ * already use (`req.customer.id`), even though the document only has `_id`.
  */
-const verifyCustomer = async (req, res, next) => {
-  const session = await readSession(req.headers.cookie);
-
-  if (!session) {
-    return res.status(401).json({ error: "Sign in to pay for an appointment." });
-  }
-
-  if (session.user.role !== "customer") {
+const verifyCustomer = (req, res, next) => {
+  if (req.user.role !== "customer") {
     return res.status(403).json({
       error: "Only customers can pay for appointments.",
     });
   }
 
-  if (session.user.isBlocked) {
+  if (req.user.isBlocked) {
     return res.status(403).json({ error: "This account is blocked." });
   }
 
-  // Made available to the route below. It is not read from the request body.
-  req.customer = session.user;
+  req.customer = { ...req.user, id: req.user._id.toString() };
   next();
 };
 
@@ -178,7 +188,7 @@ app.get('/', (req, res) => {
   res.send('Salon-Book Backend');
 });
 
-app.get('/users', verifyAdmin, async (req, res) => {
+app.get('/users',  verifyAdmin, async (req, res) => {
   try {
     const result = await users
       .find({ role: "customer" })
@@ -224,7 +234,7 @@ app.patch("/users/:id", verifyAdmin, async (req, res) => {
 
 //services related api
 
-app.post('/services', verifyAdmin, async (req, res) => {
+app.post('/services',  verifyAdmin, async (req, res) => {
   // `createdAt` is stamped here, not accepted from the client: a JSON body
   // carries an ISO string, which Mongo would store as text instead of a Date.
   const service = { ...req.body, createdAt: new Date() };
@@ -252,7 +262,7 @@ app.get("/services", async (req, res) => {
   res.send(result);
 })
 
-app.patch("/services/:id", verifyAdmin, async (req, res) => {
+app.patch("/services/:id",  verifyAdmin, async (req, res) => {
   const id = req.params.id;
   const updatedData = req.body;
 
@@ -268,7 +278,7 @@ app.patch("/services/:id", verifyAdmin, async (req, res) => {
   res.send(result);
 });
 
-app.delete("/services/:id", verifyAdmin, async (req, res) => {
+app.delete("/services/:id",  verifyAdmin, async (req, res) => {
   const id = req.params.id;
   const result = await services.deleteOne({ _id: new ObjectId(id) });
   if (result.deletedCount === 0) {
@@ -294,7 +304,7 @@ const appointmentTimeSlots = [
   "07:00 PM",
 ];
 
-app.post("/appointments", verifyCustomer, async (req, res) => {
+app.post("/appointments",  verifyCustomer, async (req, res) => {
   try {
     const {
       serviceId,
@@ -426,7 +436,7 @@ app.post("/appointments", verifyCustomer, async (req, res) => {
 });
 
 // Returns the signed-in customer's appointments, newest first.
-app.get("/appointments", verifyCustomer, async (req, res) => {
+app.get("/appointments",  verifyCustomer, async (req, res) => {
   try {
     const result = await appointments
       .find({ customerId: req.customer.id })
@@ -445,7 +455,7 @@ app.get("/appointments", verifyCustomer, async (req, res) => {
 
 // Cancels one appointment. Only the owner can cancel, and only while it is
 // still pending.
-app.patch("/appointments/:id/cancel", verifyCustomer, async (req, res) => {
+app.patch("/appointments/:id/cancel",  verifyCustomer, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -507,7 +517,7 @@ app.patch("/appointments/:id/cancel", verifyCustomer, async (req, res) => {
 //
 // The join happens here (not in the browser, and not through the unprotected
 // `/users` endpoint) and only the safe fields are selected.
-app.get("/admin/appointments", verifyAdmin, async (req, res) => {
+app.get("/admin/appointments",  verifyAdmin, async (req, res) => {
   try {
     const list = await appointments
       .find({})
@@ -576,6 +586,7 @@ app.get("/admin/appointments", verifyAdmin, async (req, res) => {
 // filter in the update makes the transition atomic.
 app.patch(
   "/admin/appointments/:id/confirm",
+  verifyToken,
   verifyAdmin,
   async (req, res) => {
     try {
@@ -630,6 +641,7 @@ app.patch(
 // appointment, but never one that is already cancelled.
 app.patch(
   "/admin/appointments/:id/cancel",
+  verifyToken,
   verifyAdmin,
   async (req, res) => {
     try {
@@ -683,7 +695,7 @@ app.patch(
 // ---------------------------------------------------------------------------
 // Payments
 // ---------------------------------------------------------------------------
-app.get("/admin/transactions", verifyAdmin, async (req, res) => {
+app.get("/admin/transactions",  verifyAdmin, async (req, res) => {
   try {
     const list = await transactions.find({}).sort({ createdAt: -1 }).toArray();
     const appointmentIds = [
@@ -765,7 +777,7 @@ app.get("/admin/transactions", verifyAdmin, async (req, res) => {
   }
 });
 
-app.post("/payments/checkout", verifyCustomer, async (req, res) => {
+app.post("/payments/checkout",  verifyCustomer, async (req, res) => {
   let session;
   try {
     if (!stripe) {
@@ -802,7 +814,24 @@ app.post("/payments/checkout", verifyCustomer, async (req, res) => {
       paymentStatus: "pending",
     });
     if (pendingTransaction) {
-      return res.status(409).json({ error: "A payment attempt is already in progress." });
+      const existingSession = await stripe.checkout.sessions.retrieve(
+        pendingTransaction.stripeSessionId
+      );
+
+      if (existingSession.status === "open" && existingSession.url) {
+        return res.json({ url: existingSession.url });
+      }
+
+      if (existingSession.status === "expired") {
+        await transactions.updateOne(
+          { _id: pendingTransaction._id, paymentStatus: "pending" },
+          { $set: { paymentStatus: "expired" } }
+        );
+      } else {
+        return res.status(409).json({
+          error: "This payment is already being completed. Refresh in a moment.",
+        });
+      }
     }
 
     session = await stripe.checkout.sessions.create({
