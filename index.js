@@ -234,7 +234,7 @@ app.patch("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
 
 //services related api
 
-app.post('/services',  verifyAdmin, async (req, res) => {
+app.post('/services', verifyToken, verifyAdmin, async (req, res) => {
   // `createdAt` is stamped here, not accepted from the client: a JSON body
   // carries an ISO string, which Mongo would store as text instead of a Date.
   const service = { ...req.body, createdAt: new Date() };
@@ -262,7 +262,7 @@ app.get("/services", async (req, res) => {
   res.send(result);
 })
 
-app.patch("/services/:id",  verifyAdmin, async (req, res) => {
+app.patch("/services/:id", verifyToken,verifyAdmin, async (req, res) => {
   const id = req.params.id;
   const updatedData = req.body;
 
