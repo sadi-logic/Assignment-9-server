@@ -455,7 +455,7 @@ app.get("/appointments", verifyToken,  verifyCustomer, async (req, res) => {
 
 // Cancels one appointment. Only the owner can cancel, and only while it is
 // still pending.
-app.patch("/appointments/:id/cancel",  verifyCustomer, async (req, res) => {
+app.patch("/appointments/:id/cancel", verifyToken,  verifyCustomer, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -517,7 +517,7 @@ app.patch("/appointments/:id/cancel",  verifyCustomer, async (req, res) => {
 //
 // The join happens here (not in the browser, and not through the unprotected
 // `/users` endpoint) and only the safe fields are selected.
-app.get("/admin/appointments",  verifyAdmin, async (req, res) => {
+app.get("/admin/appointments", verifyToken,verifyAdmin, async (req, res) => {
   try {
     const list = await appointments
       .find({})
